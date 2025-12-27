@@ -87,6 +87,20 @@ func printUsage() {
 
 // Server mode
 func serve() {
+	// Restore firewall rules on startup
+	fwConfig, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+	if fwConfig.Enabled {
+		if err := applyIPTablesRules(fwConfig); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to restore firewall rules: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Firewall restored - %d IPs whitelisted\n", len(fwConfig.AllowedIPs))
+	}
+
 	authorizedKeysMap, err := loadAuthorizedKeys()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load authorized_keys: %v\n", err)
