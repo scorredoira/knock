@@ -474,8 +474,14 @@ func clearIPs() {
 }
 
 func applyIPTablesRules(config *Config) error {
+	// Set ACCEPT first to avoid lockout during rule changes
+	cmd := exec.Command("iptables", "-P", "INPUT", "ACCEPT")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to set INPUT policy to ACCEPT: %s", output)
+	}
+
 	// Flush INPUT chain
-	cmd := exec.Command("iptables", "-F", "INPUT")
+	cmd = exec.Command("iptables", "-F", "INPUT")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("failed to flush INPUT chain: %s", output)
 	}
@@ -521,10 +527,10 @@ func applyIPTablesRules(config *Config) error {
 		}
 	}
 
-	// Drop all other SSH
-	cmd = exec.Command("iptables", "-A", "INPUT", "-p", "tcp", "--dport", "22", "-j", "DROP")
+	// Set default policy to DROP (block everything not explicitly allowed)
+	cmd = exec.Command("iptables", "-P", "INPUT", "DROP")
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to drop SSH: %s", output)
+		return fmt.Errorf("failed to set INPUT policy to DROP: %s", output)
 	}
 
 	return nil
