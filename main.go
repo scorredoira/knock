@@ -638,13 +638,33 @@ func deploy(sshHost string) {
 		servicePath = filepath.Join(sourceDir, "knock.service")
 	}
 
-	// 1. Build binary
-	fmt.Println("Building knock for linux/amd64...")
+	// 1. Detect remote architecture
+	fmt.Print("Detecting remote architecture... ")
+	archCmd := exec.Command("ssh", sshHost, "uname -m")
+	archOutput, err := archCmd.Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\nFailed to detect architecture: %v\n", err)
+		os.Exit(1)
+	}
+
+	goarch := "amd64"
+	switch strings.TrimSpace(string(archOutput)) {
+	case "x86_64":
+		goarch = "amd64"
+	case "aarch64", "arm64":
+		goarch = "arm64"
+	case "armv7l", "armv6l":
+		goarch = "arm"
+	}
+	fmt.Printf("%s (GOARCH=%s)\n", strings.TrimSpace(string(archOutput)), goarch)
+
+	// 2. Build binary
+	fmt.Printf("Building knock for linux/%s...\n", goarch)
 	tmpBinary := "/tmp/knock-deploy"
 
 	cmd := exec.Command("go", "build", "-ldflags=-s -w", "-o", tmpBinary, ".")
 	cmd.Dir = sourceDir
-	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64")
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+goarch)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -653,7 +673,7 @@ func deploy(sshHost string) {
 	}
 	defer os.Remove(tmpBinary)
 
-	// 2. Upload binary
+	// 3. Upload binary
 	fmt.Println("Uploading binary...")
 	scpArgs := []string{tmpBinary, sshHost + ":/tmp/knock"}
 	if runtime.GOOS == "darwin" {
@@ -667,7 +687,7 @@ func deploy(sshHost string) {
 		os.Exit(1)
 	}
 
-	// 3. Upload service file
+	// 4. Upload service file
 	fmt.Println("Uploading service file...")
 	scpArgs = []string{servicePath, sshHost + ":/tmp/knock.service"}
 	if runtime.GOOS == "darwin" {
@@ -681,7 +701,7 @@ func deploy(sshHost string) {
 		os.Exit(1)
 	}
 
-	// 4. Install on server
+	// 5. Install on server
 	fmt.Println("Installing...")
 	installCmds := []string{
 		"systemctl stop knock 2>/dev/null || true",
@@ -705,7 +725,7 @@ func deploy(sshHost string) {
 		}
 	}
 
-	// 5. Reset and close firewall
+	// 6. Reset and close firewall
 	fmt.Println("Configuring firewall...")
 	cmd = exec.Command("ssh", sshHost, "knock open && knock close")
 	cmd.Stdout = os.Stdout
@@ -715,7 +735,7 @@ func deploy(sshHost string) {
 		os.Exit(1)
 	}
 
-	// 6. Knock to whitelist our IP
+	// 7. Knock to whitelist our IP
 	host := sshHost
 	if idx := strings.Index(sshHost, "@"); idx != -1 {
 		host = sshHost[idx+1:]
