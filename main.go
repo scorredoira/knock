@@ -480,6 +480,19 @@ func applyIPTablesRules(config *Config) error {
 		return fmt.Errorf("failed to set INPUT policy to ACCEPT: %s", output)
 	}
 
+	// Ensure OUTPUT is always ACCEPT - server must be able to make outgoing connections
+	// (SSH to other servers, send emails, WebSockets, etc.)
+	cmd = exec.Command("iptables", "-P", "OUTPUT", "ACCEPT")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to set OUTPUT policy to ACCEPT: %s", output)
+	}
+
+	// Flush OUTPUT chain to remove any blocking rules
+	cmd = exec.Command("iptables", "-F", "OUTPUT")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to flush OUTPUT chain: %s", output)
+	}
+
 	// Flush INPUT chain
 	cmd = exec.Command("iptables", "-F", "INPUT")
 	if output, err := cmd.CombinedOutput(); err != nil {
