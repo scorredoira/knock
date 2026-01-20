@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -289,23 +288,13 @@ func saveConfig(config *Config) error {
 	return os.WriteFile(configPath, data, 0600)
 }
 
-var ipRegex = regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}$`)
-
 func isValidIP(ip string) bool {
-	if !ipRegex.MatchString(ip) {
-		return false
-	}
-	parts := strings.Split(ip, ".")
-	for _, part := range parts {
-		var num int
-		if _, err := fmt.Sscanf(part, "%d", &num); err != nil {
-			return false
-		}
-		if num < 0 || num > 255 {
-			return false
-		}
-	}
-	return true
+	return net.ParseIP(ip) != nil
+}
+
+func isIPv6(ip string) bool {
+	parsed := net.ParseIP(ip)
+	return parsed != nil && parsed.To4() == nil
 }
 
 // Firewall commands
@@ -313,6 +302,12 @@ func closeFirewall() {
 	config, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(config.AllowedIPs) == 0 {
+		fmt.Fprintf(os.Stderr, "ERROR: Cannot close firewall with 0 whitelisted IPs - you would be locked out!\n")
+		fmt.Fprintf(os.Stderr, "First add an IP with: knock add <ip>\n")
 		os.Exit(1)
 	}
 
@@ -343,21 +338,23 @@ func openFirewall() {
 		os.Exit(1)
 	}
 
-	// Flush all chains and set ACCEPT policy
-	commands := [][]string{
-		{"iptables", "-F", "INPUT"},
-		{"iptables", "-F", "OUTPUT"},
-		{"iptables", "-F", "FORWARD"},
-		{"iptables", "-P", "INPUT", "ACCEPT"},
-		{"iptables", "-P", "OUTPUT", "ACCEPT"},
-		{"iptables", "-P", "FORWARD", "ACCEPT"},
-	}
+	// Flush all chains and set ACCEPT policy for both IPv4 and IPv6
+	for _, iptables := range []string{"iptables", "ip6tables"} {
+		commands := [][]string{
+			{iptables, "-F", "INPUT"},
+			{iptables, "-F", "OUTPUT"},
+			{iptables, "-F", "FORWARD"},
+			{iptables, "-P", "INPUT", "ACCEPT"},
+			{iptables, "-P", "OUTPUT", "ACCEPT"},
+			{iptables, "-P", "FORWARD", "ACCEPT"},
+		}
 
-	for _, args := range commands {
-		cmd := exec.Command(args[0], args[1:]...)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to run %v: %s\n", args, output)
-			os.Exit(1)
+		for _, args := range commands {
+			cmd := exec.Command(args[0], args[1:]...)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to run %v: %s\n", args, output)
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -432,6 +429,12 @@ func removeIP(ip string) {
 		return
 	}
 
+	if config.Enabled && len(newIPs) == 0 {
+		fmt.Fprintf(os.Stderr, "ERROR: Cannot remove last IP while firewall is enabled - you would be locked out!\n")
+		fmt.Fprintf(os.Stderr, "First disable firewall with: knock open\n")
+		os.Exit(1)
+	}
+
 	config.AllowedIPs = newIPs
 	if err := saveConfig(config); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to save config: %v\n", err)
@@ -455,6 +458,12 @@ func clearIPs() {
 		os.Exit(1)
 	}
 
+	if config.Enabled {
+		fmt.Fprintf(os.Stderr, "ERROR: Cannot clear IPs while firewall is enabled - you would be locked out!\n")
+		fmt.Fprintf(os.Stderr, "First disable firewall with: knock open\n")
+		os.Exit(1)
+	}
+
 	count := len(config.AllowedIPs)
 	config.AllowedIPs = []string{}
 
@@ -463,87 +472,86 @@ func clearIPs() {
 		os.Exit(1)
 	}
 
-	if config.Enabled {
-		if err := applyIPTablesRules(config); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to apply iptables rules: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
 	fmt.Printf("Cleared %d IPs from whitelist\n", count)
 }
 
 func applyIPTablesRules(config *Config) error {
-	// Set ACCEPT first to avoid lockout during rule changes
-	cmd := exec.Command("iptables", "-P", "INPUT", "ACCEPT")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to set INPUT policy to ACCEPT: %s", output)
-	}
-
-	// Ensure OUTPUT is always ACCEPT - server must be able to make outgoing connections
-	// (SSH to other servers, send emails, WebSockets, etc.)
-	cmd = exec.Command("iptables", "-P", "OUTPUT", "ACCEPT")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to set OUTPUT policy to ACCEPT: %s", output)
-	}
-
-	// Flush OUTPUT chain to remove any blocking rules
-	cmd = exec.Command("iptables", "-F", "OUTPUT")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to flush OUTPUT chain: %s", output)
-	}
-
-	// Flush INPUT chain
-	cmd = exec.Command("iptables", "-F", "INPUT")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to flush INPUT chain: %s", output)
-	}
-
-	// Allow established connections
-	cmd = exec.Command("iptables", "-A", "INPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to allow established connections: %s", output)
-	}
-
-	// Allow loopback
-	cmd = exec.Command("iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to allow loopback: %s", output)
-	}
-
-	// Allow HTTP/HTTPS
-	cmd = exec.Command("iptables", "-A", "INPUT", "-p", "tcp", "--dport", "80", "-j", "ACCEPT")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to allow HTTP: %s", output)
-	}
-
-	cmd = exec.Command("iptables", "-A", "INPUT", "-p", "tcp", "--dport", "443", "-j", "ACCEPT")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to allow HTTPS: %s", output)
-	}
-
-	// Allow knock port (722) from anywhere - needed for knocking
-	cmd = exec.Command("iptables", "-A", "INPUT", "-p", "tcp", "--dport", "722", "-j", "ACCEPT")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to allow knock port: %s", output)
-	}
-
-	if !config.Enabled {
-		return nil
-	}
-
-	// Allow SSH from whitelisted IPs
-	for _, ip := range config.AllowedIPs {
-		cmd = exec.Command("iptables", "-A", "INPUT", "-p", "tcp", "-s", ip, "--dport", "22", "-j", "ACCEPT")
+	// Apply rules for both IPv4 (iptables) and IPv6 (ip6tables)
+	for _, iptables := range []string{"iptables", "ip6tables"} {
+		// Set ACCEPT first to avoid lockout during rule changes
+		cmd := exec.Command(iptables, "-P", "INPUT", "ACCEPT")
 		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("failed to add rule for IP %s: %s", ip, output)
+			return fmt.Errorf("failed to set INPUT policy to ACCEPT (%s): %s", iptables, output)
 		}
-	}
 
-	// Set default policy to DROP (block everything not explicitly allowed)
-	cmd = exec.Command("iptables", "-P", "INPUT", "DROP")
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to set INPUT policy to DROP: %s", output)
+		// Ensure OUTPUT is always ACCEPT
+		cmd = exec.Command(iptables, "-P", "OUTPUT", "ACCEPT")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to set OUTPUT policy to ACCEPT (%s): %s", iptables, output)
+		}
+
+		// Flush OUTPUT chain
+		cmd = exec.Command(iptables, "-F", "OUTPUT")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to flush OUTPUT chain (%s): %s", iptables, output)
+		}
+
+		// Flush INPUT chain
+		cmd = exec.Command(iptables, "-F", "INPUT")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to flush INPUT chain (%s): %s", iptables, output)
+		}
+
+		// Allow established connections
+		cmd = exec.Command(iptables, "-A", "INPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to allow established connections (%s): %s", iptables, output)
+		}
+
+		// Allow loopback
+		cmd = exec.Command(iptables, "-A", "INPUT", "-i", "lo", "-j", "ACCEPT")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to allow loopback (%s): %s", iptables, output)
+		}
+
+		// Allow HTTP/HTTPS
+		cmd = exec.Command(iptables, "-A", "INPUT", "-p", "tcp", "--dport", "80", "-j", "ACCEPT")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to allow HTTP (%s): %s", iptables, output)
+		}
+
+		cmd = exec.Command(iptables, "-A", "INPUT", "-p", "tcp", "--dport", "443", "-j", "ACCEPT")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to allow HTTPS (%s): %s", iptables, output)
+		}
+
+		// Allow knock port (722) from anywhere
+		cmd = exec.Command(iptables, "-A", "INPUT", "-p", "tcp", "--dport", "722", "-j", "ACCEPT")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to allow knock port (%s): %s", iptables, output)
+		}
+
+		if !config.Enabled {
+			continue
+		}
+
+		// Allow SSH from whitelisted IPs (only add to matching iptables version)
+		for _, ip := range config.AllowedIPs {
+			isV6 := isIPv6(ip)
+			if (iptables == "ip6tables") != isV6 {
+				continue // Skip: wrong iptables version for this IP
+			}
+			cmd = exec.Command(iptables, "-A", "INPUT", "-p", "tcp", "-s", ip, "--dport", "22", "-j", "ACCEPT")
+			if output, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("failed to add rule for IP %s (%s): %s", ip, iptables, output)
+			}
+		}
+
+		// Set default policy to DROP
+		cmd = exec.Command(iptables, "-P", "INPUT", "DROP")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to set INPUT policy to DROP (%s): %s", iptables, output)
+		}
 	}
 
 	return nil
@@ -758,23 +766,23 @@ func deploy(sshHost string) {
 		}
 	}
 
-	// 6. Reset and close firewall
-	fmt.Println("Configuring firewall...")
-	cmd = exec.Command("ssh", sshHost, "knock open && knock close")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to close firewall: %v\n", err)
-		os.Exit(1)
-	}
-
-	// 7. Knock to whitelist our IP
+	// 6. Knock to whitelist our IP BEFORE closing firewall
 	host := sshHost
 	if idx := strings.Index(sshHost, "@"); idx != -1 {
 		host = sshHost[idx+1:]
 	}
 	fmt.Printf("Knocking to whitelist our IP...\n")
 	knock(host)
+
+	// 7. Now close the firewall (our IP is already whitelisted)
+	fmt.Println("Configuring firewall...")
+	cmd = exec.Command("ssh", sshHost, "knock close")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to close firewall: %v\n", err)
+		os.Exit(1)
+	}
 
 	fmt.Println("Done - firewall active, your IP whitelisted")
 }
