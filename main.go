@@ -525,6 +525,11 @@ func applyIPTablesRules(config *Config) error {
 			return fmt.Errorf("failed to allow HTTPS (%s): %s", iptables, output)
 		}
 
+		cmd = exec.Command(iptables, "-A", "INPUT", "-p", "tcp", "--dport", "9443", "-j", "ACCEPT")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to allow port 9443 (%s): %s", iptables, output)
+		}
+
 		// Allow knock port (722) from anywhere
 		cmd = exec.Command(iptables, "-A", "INPUT", "-p", "tcp", "--dport", "722", "-j", "ACCEPT")
 		if output, err := cmd.CombinedOutput(); err != nil {
