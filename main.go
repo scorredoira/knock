@@ -771,21 +771,13 @@ func deploy(sshHost string) {
 		}
 	}
 
-	// 6. Knock to whitelist our IP BEFORE closing firewall
-	host := sshHost
-	if idx := strings.Index(sshHost, "@"); idx != -1 {
-		host = sshHost[idx+1:]
-	}
-	fmt.Printf("Knocking to whitelist our IP...\n")
-	knock(host)
-
-	// 7. Now close the firewall (our IP is already whitelisted)
+	// 6. Whitelist our IP (via SSH_CLIENT) and close firewall
 	fmt.Println("Configuring firewall...")
-	cmd = exec.Command("ssh", sshHost, "knock close")
+	cmd = exec.Command("ssh", sshHost, `IP=$(echo $SSH_CLIENT | awk '{print $1}') && echo "Whitelisting $IP" && knock add $IP && knock close`)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to close firewall: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to configure firewall: %v\n", err)
 		os.Exit(1)
 	}
 
