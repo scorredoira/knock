@@ -771,9 +771,27 @@ func deploy(sshHost string) {
 		}
 	}
 
-	// 6. Whitelist our IP (via SSH_CLIENT) and close firewall
+	// 6. Detect deployer's IP and whitelist it
+	fmt.Print("Detecting your IP... ")
+	ipCmd := exec.Command("ssh", sshHost, "echo $SSH_CLIENT | awk '{print $1}'")
+	ipOutput, err := ipCmd.Output()
+	deployerIP := strings.TrimSpace(string(ipOutput))
+	if err != nil || deployerIP == "" {
+		// Fallback: use 'who am i' or 'ss' to find the connecting IP
+		ipCmd = exec.Command("ssh", sshHost, "ss -tnp | grep 'sshd' | head -1 | awk '{print $5}' | rev | cut -d: -f2- | rev")
+		ipOutput, err = ipCmd.Output()
+		deployerIP = strings.TrimSpace(string(ipOutput))
+	}
+	if deployerIP == "" || !isValidIP(deployerIP) {
+		fmt.Fprintf(os.Stderr, "\nCould not detect your IP automatically.\n")
+		fmt.Fprintf(os.Stderr, "Add it manually with: ssh %s knock add <your-ip> && ssh %s knock close\n", sshHost, sshHost)
+		os.Exit(1)
+	}
+	fmt.Println(deployerIP)
+
+	// 7. Whitelist and close firewall
 	fmt.Println("Configuring firewall...")
-	cmd = exec.Command("ssh", sshHost, `IP=$(echo $SSH_CLIENT | awk '{print $1}') && echo "Whitelisting $IP" && knock add $IP && knock close`)
+	cmd = exec.Command("ssh", sshHost, fmt.Sprintf("knock add %s && knock close", deployerIP))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
