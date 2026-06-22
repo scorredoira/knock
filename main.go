@@ -100,11 +100,15 @@ func serve() {
 		fmt.Printf("Firewall restored - %d IPs whitelisted\n", len(fwConfig.AllowedIPs))
 	}
 
-	authorizedKeysMap, err := loadAuthorizedKeys()
+	// Validate authorized_keys at startup so we fail loud on a missing/empty
+	// file. The callback re-reads the file on every attempt (see below), so
+	// keys added or revoked while the daemon runs take effect immediately.
+	keys, err := loadAuthorizedKeys()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load authorized_keys: %v\n", err)
 		os.Exit(1)
 	}
+	fmt.Printf("Loaded %d authorized keys\n", len(keys))
 
 	hostKey, err := loadHostKey()
 	if err != nil {
@@ -114,7 +118,14 @@ func serve() {
 
 	config := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if authorizedKeysMap[string(key.Marshal())] {
+			// Re-read authorized_keys on every attempt (like sshd) so the
+			// daemon never needs a restart to pick up added/revoked keys.
+			// On a read error, deny — never fall through to accept.
+			authorizedKeys, err := loadAuthorizedKeys()
+			if err != nil {
+				return nil, fmt.Errorf("could not load authorized_keys: %w", err)
+			}
+			if authorizedKeys[string(key.Marshal())] {
 				return &ssh.Permissions{}, nil
 			}
 			return nil, fmt.Errorf("unknown public key for %q", conn.User())
@@ -197,7 +208,6 @@ func loadAuthorizedKeys() (map[string]bool, error) {
 		return nil, fmt.Errorf("no valid keys found in %s", authorizedKeys)
 	}
 
-	fmt.Printf("Loaded %d authorized keys\n", len(keys))
 	return keys, nil
 }
 
