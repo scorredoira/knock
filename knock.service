@@ -8,5 +8,29 @@ ExecStart=/usr/local/bin/knock serve
 Restart=always
 RestartSec=5
 
+# Hardening. The daemon needs root to drive iptables, but nothing else: it only
+# reads /etc/knock and shells out to iptables.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/etc/knock
+# read-only, not true: the daemon reads /root/.ssh/authorized_keys on every
+# auth attempt, which ProtectHome=true would hide.
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+# The knock port is public, so bound what a flood can cost.
+LimitNOFILE=1024
+TasksMax=128
+MemoryMax=128M
+
 [Install]
 WantedBy=multi-user.target
