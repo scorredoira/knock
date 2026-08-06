@@ -118,12 +118,25 @@ func handleConnection(conn net.Conn, sshConfig *ssh.ServerConfig) {
 		return
 	}
 
-	sshConn, _, _, err := ssh.NewServerConn(conn, sshConfig)
+	sshConn, chans, reqs, err := ssh.NewServerConn(conn, sshConfig)
 	if err != nil {
 		fmt.Printf("Auth failed from %s: %v\n", clientIP, err)
 		return
 	}
 	defer sshConn.Close()
+
+	go ssh.DiscardRequests(reqs)
+
+	// The user name says which of the two this connection is. A command
+	// session must not whitelist anybody: `knock <host> out` would otherwise
+	// undo itself.
+	if sshConn.User() == commandUser {
+		fmt.Printf("Auth OK from %s, running commands\n", clientIP)
+		serveCommands(chans, clientIP)
+		return
+	}
+
+	go rejectChannels(chans)
 
 	fmt.Printf("Auth OK from %s, adding to whitelist\n", clientIP)
 
@@ -137,6 +150,65 @@ func handleConnection(conn net.Conn, sshConfig *ssh.ServerConfig) {
 	fmt.Printf("IP %s whitelisted\n", clientIP)
 	sshConn.OpenChannel("ok", nil)
 	time.Sleep(100 * time.Millisecond)
+}
+
+// rejectChannels drains the channels a knock connection is not expected to
+// open. Left unread, the mux blocks and the knock never gets its reply.
+func rejectChannels(chans <-chan ssh.NewChannel) {
+	for newChannel := range chans {
+		newChannel.Reject(ssh.Prohibited, "this connection is a knock, not a command session")
+	}
+}
+
+func serveCommands(chans <-chan ssh.NewChannel, clientIP string) {
+	for newChannel := range chans {
+		if newChannel.ChannelType() != commandChannel {
+			newChannel.Reject(ssh.UnknownChannelType, "unknown channel type")
+			continue
+		}
+
+		var request commandRequest
+		if err := ssh.Unmarshal(newChannel.ExtraData(), &request); err != nil {
+			newChannel.Reject(ssh.ConnectionFailed, "malformed command")
+			continue
+		}
+
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to accept command channel from %s: %v\n", clientIP, err)
+			return
+		}
+		go ssh.DiscardRequests(requests)
+
+		fmt.Printf("Command %q from %s\n", request.Command, clientIP)
+
+		output, err := runRemoteCommand(request.Command, clientIP)
+		if err != nil {
+			fmt.Fprintf(channel.Stderr(), "%v\n", err)
+			sendExitStatus(channel, 1)
+		} else {
+			fmt.Fprintf(channel, "%s\n", output)
+			sendExitStatus(channel, 0)
+		}
+
+		channel.Close()
+	}
+}
+
+// runRemoteCommand is the entire surface the knock port exposes, and it is one
+// word. Not a lookup into the command table with a flag to check — a literal:
+// whatever a client sends, the only thing that can come out of here is the
+// caller losing its own access.
+func runRemoteCommand(line string, clientIP string) (string, error) {
+	if line != "out" {
+		return "", fmt.Errorf("the knock port only takes `out` - everything else is run on the server itself")
+	}
+
+	return outCommand(invocation{clientIP: clientIP})
+}
+
+func sendExitStatus(channel ssh.Channel, status uint32) {
+	channel.SendRequest("exit-status", false, ssh.Marshal(exitStatus{Status: status}))
 }
 
 func loadHostKey() (ssh.Signer, error) {

@@ -23,231 +23,78 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	// Only the flags, never a bare `help`: that is a perfectly good host name,
+	// and a host name is what this argument usually is.
+	case "-h", "--help":
+		printUsage()
+		return
 	case "serve":
 		serve()
-	case "close":
-		closeFirewall()
-	case "open":
-		openFirewall()
-	case "status":
-		status()
-	case "list":
-		listIPs()
-	case "add":
-		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: knock add <ip>\n")
-			os.Exit(1)
-		}
-		addIP(os.Args[2])
-	case "remove":
-		if len(os.Args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: knock remove <ip>\n")
-			os.Exit(1)
-		}
-		removeIP(os.Args[2])
-	case "clear":
-		clearIPs()
+		return
 	case "deploy":
 		if len(os.Args) < 3 {
 			fmt.Fprintf(os.Stderr, "Usage: knock deploy <user@host>\n")
 			os.Exit(1)
 		}
 		deploy(os.Args[2])
-	default:
-		knock(os.Args[1])
-	}
-}
-
-func printUsage() {
-	fmt.Println("Usage:")
-	fmt.Println("  knock serve            Start daemon (port 722)")
-	fmt.Println("  knock <host>           Knock to whitelist your IP")
-	fmt.Println("  knock deploy <host>    Deploy to server")
-	fmt.Println("")
-	fmt.Println("Firewall commands (server):")
-	fmt.Println("  knock close            Enable the firewall")
-	fmt.Println("  knock open             Disable the firewall (escape hatch)")
-	fmt.Println("  knock status           Show firewall status")
-	fmt.Println("  knock list             List whitelisted IPs")
-	fmt.Println("  knock add <ip>         Add IP to whitelist")
-	fmt.Println("  knock remove <ip>      Remove IP from whitelist")
-	fmt.Println("  knock clear            Remove all IPs from whitelist")
-}
-
-func closeFirewall() {
-	err := withConfigLock(func() error {
-		config, err := loadConfig()
-		if err != nil {
-			return err
-		}
-
-		if len(config.AllowedIPs) == 0 {
-			return fmt.Errorf("cannot close firewall with 0 whitelisted IPs - you would be locked out\nFirst add an IP with: knock add <ip>")
-		}
-
-		config.Enabled = true
-		if err := saveConfig(config); err != nil {
-			return err
-		}
-
-		if err := applyIPTablesRules(config); err != nil {
-			return err
-		}
-
-		fmt.Printf("Firewall ENABLED - %d IPs whitelisted, protected ports %v\n", len(config.AllowedIPs), config.ProtectedPorts)
-		return nil
-	})
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
-	}
-}
-
-func openFirewall() {
-	err := withConfigLock(func() error {
-		config, err := loadConfig()
-		if err != nil {
-			return err
-		}
-
-		config.Enabled = false
-		if err := saveConfig(config); err != nil {
-			return err
-		}
-
-		return removeIPTablesRules()
-	})
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to open firewall: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Println("Firewall DISABLED - knock rules removed, all ports open")
-}
-
-func status() {
-	config, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
-		os.Exit(1)
-	}
-
-	if config.Enabled {
-		fmt.Printf("Firewall: ENABLED\n")
-	} else {
-		fmt.Printf("Firewall: DISABLED (all ports open)\n")
-	}
-	fmt.Printf("Public ports:    %v\n", config.PublicPorts)
-	fmt.Printf("Protected ports: %v (%d IPs whitelisted)\n", config.ProtectedPorts, len(config.AllowedIPs))
-}
-
-func listIPs() {
-	config, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
-		os.Exit(1)
-	}
-
-	if len(config.AllowedIPs) == 0 {
-		fmt.Println("No whitelisted IPs")
 		return
 	}
 
-	fmt.Println("Whitelisted IPs:")
-	for _, ip := range config.AllowedIPs {
-		fmt.Printf("  %s\n", ip)
+	// A known verb runs here, on this machine. Anything else is a host: bare
+	// it is a knock, followed by a verb it is that verb run on that server.
+	if cmd := findCommand(os.Args[1]); cmd != nil {
+		runLocal(cmd, os.Args[2:])
+		return
 	}
+
+	host := os.Args[1]
+	if len(os.Args) == 2 {
+		knock(host)
+		return
+	}
+	remoteCommand(host, os.Args[2:])
 }
 
-func addIP(ip string) {
-	if !isValidIP(ip) {
-		fmt.Fprintf(os.Stderr, "Invalid IP address: %s\n", ip)
+func printUsage() {
+	fmt.Println("knock - port knocking firewall")
+	fmt.Println("")
+	fmt.Println("From your machine:")
+	fmt.Println("  knock <host>                 Knock: whitelist your IP")
+	fmt.Println("  knock <host> out             Remove your IP - the opposite of a knock")
+	fmt.Println("  knock deploy <user@host>     Build, upload and install knock")
+	fmt.Println("")
+	fmt.Println("On the server:")
+	fmt.Println("  knock serve                  Run the daemon (port 722)")
+	for _, cmd := range commands {
+		if cmd.remote {
+			continue
+		}
+		fmt.Printf("  knock %-22s %s\n", strings.TrimSpace(cmd.name+" "+cmd.params), cmd.help)
+	}
+	fmt.Println("")
+	fmt.Println("The knock port is open to the whole internet, so it does one thing: it")
+	fmt.Println("opens you and it closes you. Everything else administers the box and is")
+	fmt.Println("run on the box.")
+}
+
+func runLocal(cmd *command, args []string) {
+	if cmd.remote {
+		fmt.Fprintf(os.Stderr, "%s only works against a remote server: knock <host> %s\n", cmd.name, cmd.name)
 		os.Exit(1)
 	}
 
-	if err := addIPToFirewall(ip); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to add IP: %v\n", err)
+	if len(args) != cmd.argCount() {
+		fmt.Fprintf(os.Stderr, "Usage: knock %s %s\n", cmd.name, cmd.params)
 		os.Exit(1)
 	}
 
-	fmt.Printf("IP %s added to whitelist\n", ip)
-}
-
-func removeIP(ip string) {
-	err := withConfigLock(func() error {
-		config, err := loadConfig()
-		if err != nil {
-			return err
-		}
-
-		found := false
-		remaining := make([]string, 0, len(config.AllowedIPs))
-		for _, existing := range config.AllowedIPs {
-			if existing != ip {
-				remaining = append(remaining, existing)
-			} else {
-				found = true
-			}
-		}
-
-		if !found {
-			fmt.Printf("IP %s not in whitelist\n", ip)
-			return nil
-		}
-
-		if config.Enabled && len(remaining) == 0 {
-			return fmt.Errorf("cannot remove last IP while firewall is enabled - you would be locked out\nFirst disable firewall with: knock open")
-		}
-
-		config.AllowedIPs = remaining
-		if err := saveConfig(config); err != nil {
-			return err
-		}
-
-		if config.Enabled {
-			if err := applyIPTablesRules(config); err != nil {
-				return err
-			}
-		}
-
-		fmt.Printf("IP %s removed from whitelist\n", ip)
-		return nil
-	})
-
+	output, err := cmd.run(invocation{args: args})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
-}
 
-func clearIPs() {
-	err := withConfigLock(func() error {
-		config, err := loadConfig()
-		if err != nil {
-			return err
-		}
-
-		if config.Enabled {
-			return fmt.Errorf("cannot clear IPs while firewall is enabled - you would be locked out\nFirst disable firewall with: knock open")
-		}
-
-		count := len(config.AllowedIPs)
-		config.AllowedIPs = []string{}
-
-		if err := saveConfig(config); err != nil {
-			return err
-		}
-
-		fmt.Printf("Cleared %d IPs from whitelist\n", count)
-		return nil
-	})
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
-	}
+	fmt.Println(output)
 }
 
 // Deploy mode

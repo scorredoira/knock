@@ -22,13 +22,33 @@ Esto:
 ```bash
 knock servidor      # Añade tu IP a la whitelist
 knock git           # Usa alias de ~/.ssh/config
+knock servidor out  # Quita tu IP: lo contrario de un knock
 ```
 
 La clave del servidor se fija en el primer knock (TOFU) y se guarda en
 `~/.knock/known_hosts.json`. Si cambia, el knock falla — borra la entrada si has
 reinstalado el servidor.
 
+`out` no lleva argumento **a propósito**: solo puede quitar la IP desde la que
+llamas, así que no puede tocar el acceso de nadie más. Tu sesión SSH abierta no
+se corta (la cadena acepta `ESTABLISHED` primero); afecta a conexiones nuevas.
+
+## Qué escucha el puerto 722
+
+El 722 está abierto a todo internet, así que hace **una cosa**: te abre y te
+cierra. Nada más.
+
+Son las dos únicas operaciones que llegan por la red, y las dos están limitadas
+a la IP de quien llama: el knock no lleva IP y `out` no lleva argumento, así que
+ninguna puede tocar el acceso de nadie más. No hay que razonar sobre qué comando
+es seguro exponer, porque no hay más comandos.
+
+La comprobación está **en el servidor** (`runRemoteCommand`, `server.go`), no en
+el cliente, y no es una tabla con un flag: es comparar con `out`.
+
 ## Uso (servidor)
+
+Administrar la máquina se hace **en la máquina**, entrando por SSH:
 
 ```bash
 knock status        # Ver estado, puertos públicos y protegidos
@@ -36,9 +56,13 @@ knock list          # Listar IPs en whitelist
 knock add 1.2.3.4   # Añadir IP manualmente
 knock remove 1.2.3.4
 knock clear         # Eliminar todas las IPs
-knock open          # Desactivar el firewall (vía de escape)
+knock open          # Desactivar el firewall entero (vía de escape)
 knock close         # Activar el firewall
 ```
+
+`knock -h` lo resume. `remove <ip>` se niega a vaciar la whitelist con el
+firewall activo: quita el acceso a otro, que no ha pedido nada. `out` no lleva
+ese freno — te quitas tú, a sabiendas, y knockeas otra vez cuando quieras.
 
 ## Puertos
 
@@ -107,3 +131,9 @@ Las opciones de cada clave no se ignoran:
 2. Servidor verifica clave pública contra `/root/.ssh/authorized_keys`
 3. Si OK, añade la IP del cliente a la cadena KNOCK
 4. Cliente puede conectar por SSH normal (puerto 22)
+
+Un knock y un comando remoto son la misma conexión, y se distinguen por el
+nombre de usuario con el que autentica el cliente (`knock` o `command`). El
+servidor tiene que saber cuál de los dos es **antes** de actuar: un knock
+whitelistea al que llama nada más verlo, y un comando no debe hacerlo nunca — si
+no, `knock <host> out` se desharía a sí mismo.

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,18 +13,16 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-func knock(host string) {
+// dial opens the knock port. user is what tells the server whether this
+// connection is a knock or a command session.
+func dial(host string, user string) (*ssh.Client, error) {
 	signers := loadClientKeys()
 	if len(signers) == 0 {
-		fmt.Fprintf(os.Stderr, "No SSH keys found in ~/.ssh/\n")
-		os.Exit(1)
+		return nil, fmt.Errorf("no SSH keys found in ~/.ssh/")
 	}
 
-	// Resolve host alias from ~/.ssh/config
-	resolvedHost := resolveSSHHost(host)
-
 	config := &ssh.ClientConfig{
-		User: "knock",
+		User: user,
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signers...),
 		},
@@ -31,10 +30,18 @@ func knock(host string) {
 		Timeout:         10 * time.Second,
 	}
 
-	addr := fmt.Sprintf("%s:%d", resolvedHost, port)
-	fmt.Printf("Knocking %s...\n", addr)
+	// Resolve host alias from ~/.ssh/config
+	return ssh.Dial("tcp", serverAddress(host), config)
+}
 
-	conn, err := ssh.Dial("tcp", addr, config)
+func serverAddress(host string) string {
+	return fmt.Sprintf("%s:%d", resolveSSHHost(host), port)
+}
+
+func knock(host string) {
+	fmt.Printf("Knocking %s...\n", serverAddress(host))
+
+	conn, err := dial(host, knockUser)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed: %v\n", err)
 		os.Exit(1)
@@ -54,6 +61,57 @@ func knock(host string) {
 		fmt.Fprintf(os.Stderr, "Failed: timeout waiting for server\n")
 		os.Exit(1)
 	}
+}
+
+// remoteCommand runs a command on the server over the knock port, which is the
+// only one guaranteed to be reachable: port 22 is exactly what may be closed to
+// you. The server decides which commands it will take from the network.
+func remoteCommand(host string, args []string) {
+	conn, err := dial(host, commandUser)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+
+	channel, requests, err := conn.OpenChannel(commandChannel, ssh.Marshal(commandRequest{Command: strings.Join(args, " ")}))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "If that server runs an older knock, update it with: knock deploy <user@host>\n")
+		os.Exit(1)
+	}
+	defer channel.Close()
+
+	status := make(chan uint32, 1)
+	go func() {
+		defer close(status)
+		for request := range requests {
+			var payload exitStatus
+			if request.Type == "exit-status" && ssh.Unmarshal(request.Payload, &payload) == nil {
+				status <- payload.Status
+			}
+			if request.WantReply {
+				request.Reply(false, nil)
+			}
+		}
+	}()
+
+	stderrDone := make(chan struct{})
+	go func() {
+		defer close(stderrDone)
+		io.Copy(os.Stderr, channel.Stderr())
+	}()
+
+	io.Copy(os.Stdout, channel)
+	<-stderrDone
+
+	code, ok := <-status
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Server closed the connection without reporting a status\n")
+		os.Exit(1)
+	}
+
+	os.Exit(int(code))
 }
 
 func knownHostsPath() string {
