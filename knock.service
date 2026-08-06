@@ -9,8 +9,9 @@ Restart=always
 RestartSec=5
 
 # Hardening. The daemon needs root to drive iptables, but nothing else: it only
-# reads /etc/knock and shells out to iptables.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+# reads /etc/knock and shells out to iptables. CAP_NET_BIND_SERVICE is not
+# optional: 722 is below 1024, so bind fails with EACCES without it.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/etc/knock
