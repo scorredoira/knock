@@ -99,23 +99,19 @@ func runLocal(cmd *command, args []string) {
 
 // Deploy mode
 func deploy(sshHost string) {
-	execPath, err := os.Executable()
+	// Checked before anything touches the server: a release binary has no
+	// source to build, and a half-run deploy is worse than none.
+	sourceDir, err := findSourceDir()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get executable path: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		fmt.Fprintf(os.Stderr, "knock deploy builds knock from source: run it from a clone of https://github.com/scorredoira/knock, with Go installed.\n")
 		os.Exit(1)
 	}
-
-	sourceDir, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get working directory: %v\n", err)
+	if _, err := exec.LookPath("go"); err != nil {
+		fmt.Fprintf(os.Stderr, "Go is not installed: knock deploy needs it to build knock for the server.\n")
 		os.Exit(1)
 	}
-
 	servicePath := filepath.Join(sourceDir, "knock.service")
-	if _, err := os.Stat(servicePath); os.IsNotExist(err) {
-		sourceDir = filepath.Dir(execPath)
-		servicePath = filepath.Join(sourceDir, "knock.service")
-	}
 
 	// 1. Detect remote architecture
 	fmt.Print("Detecting remote architecture... ")
@@ -244,4 +240,42 @@ func deploy(sshHost string) {
 	}
 
 	fmt.Println("Done - firewall active, your IP whitelisted")
+}
+
+// findSourceDir returns the knock source tree deploy builds from: the working
+// directory, or else the one the binary sits in, when it was built in place.
+func findSourceDir() (string, error) {
+	var candidates []string
+	if dir, err := os.Getwd(); err == nil {
+		candidates = append(candidates, dir)
+	}
+	if execPath, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Dir(execPath))
+	}
+
+	for _, dir := range candidates {
+		if isSourceDir(dir) {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("knock source not found in the current directory")
+}
+
+func isSourceDir(dir string) bool {
+	goMod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil || modfileModule(goMod) != "knock" {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(dir, "knock.service"))
+	return err == nil
+}
+
+func modfileModule(goMod []byte) string {
+	for _, line := range strings.Split(string(goMod), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "module" {
+			return fields[1]
+		}
+	}
+	return ""
 }

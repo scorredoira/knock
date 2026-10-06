@@ -10,6 +10,10 @@ autenticándote con tu clave SSH contra el puerto 722.
 knock deploy user@servidor
 ```
 
+Se lanza desde un clon de este repo y necesita Go: compila knock para el
+servidor. Fuera del código fuente avisa y no toca nada. Los binarios de las
+releases sirven para knockear desde mac, Windows o Linux.
+
 Esto:
 1. Compila y sube el binario
 2. Instala el servicio systemd
