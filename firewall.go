@@ -37,8 +37,10 @@ func buildChainRules(config *Config, v6 bool) [][]string {
 	// The knock port is the way back in, so it stays reachable from anywhere.
 	// Rate limit new connections per source: each one costs a key exchange, and
 	// nothing else on this port is throttled.
+	// On IPv6 a source is a /64: one host is routinely handed a whole one, and
+	// counting each /128 apart would hand it endless fresh quotas.
 	knockPort := strconv.Itoa(port)
-	rules = append(rules, []string{
+	limit := []string{
 		"-p", "tcp", "--dport", knockPort,
 		"-m", "conntrack", "--ctstate", "NEW",
 		"-m", "hashlimit",
@@ -46,8 +48,11 @@ func buildChainRules(config *Config, v6 bool) [][]string {
 		"--hashlimit-mode", "srcip",
 		"--hashlimit-above", "10/minute",
 		"--hashlimit-burst", "10",
-		"-j", "DROP",
-	})
+	}
+	if v6 {
+		limit = append(limit, "--hashlimit-srcmask", "64")
+	}
+	rules = append(rules, append(limit, "-j", "DROP"))
 	rules = append(rules, []string{"-p", "tcp", "--dport", knockPort, "-j", "ACCEPT"})
 
 	// Protected ports: only from whitelisted IPs of the matching family.
@@ -69,38 +74,43 @@ func buildChainRules(config *Config, v6 bool) [][]string {
 }
 
 // applyIPTablesRules rebuilds the KNOCK chain and makes sure INPUT jumps to it.
-// The chain ends in DROP, so during the rebuild the box fails closed instead of
-// briefly accepting everything the way a policy flip would.
+//
+// The whole chain goes in as one iptables-restore transaction. Flushing it and
+// appending rule by rule would leave it empty or without its final DROP for a
+// moment — and for good if a rule failed halfway — and an unterminated chain
+// returns to INPUT, which usually accepts: the box would fail open.
 func applyIPTablesRules(config *Config) error {
 	for _, iptables := range []string{"iptables", "ip6tables"} {
 		v6 := iptables == "ip6tables"
+		input := buildRestoreInput(buildChainRules(config, v6), !jumpInstalled(iptables))
 
-		if !chainExists(iptables) {
-			if err := runIPTables(iptables, "-N", chainName); err != nil {
-				return err
-			}
-		}
-
-		if err := runIPTables(iptables, "-F", chainName); err != nil {
-			return err
-		}
-
-		rules := buildChainRules(config, v6)
-		for _, rule := range rules {
-			args := append([]string{"-A", chainName}, rule...)
-			if err := runIPTables(iptables, args...); err != nil {
-				return err
-			}
-		}
-
-		if !jumpInstalled(iptables) {
-			if err := runIPTables(iptables, "-I", "INPUT", "1", "-j", chainName); err != nil {
-				return err
-			}
+		// --noflush leaves every other chain alone. Declaring KNOCK still
+		// creates or flushes it, inside the same commit.
+		cmd := exec.Command(iptables+"-restore", "--noflush")
+		cmd.Stdin = strings.NewReader(input)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%s-restore: %v: %s", iptables, err, strings.TrimSpace(string(output)))
 		}
 	}
 
 	return nil
+}
+
+// buildRestoreInput renders the chain as iptables-restore input for the filter
+// table. addJump hooks INPUT up to the chain in the same commit.
+func buildRestoreInput(rules [][]string, addJump bool) string {
+	var b strings.Builder
+	b.WriteString("*filter\n")
+	b.WriteString(":" + chainName + " - [0:0]\n")
+	for _, rule := range rules {
+		b.WriteString("-A " + chainName + " " + strings.Join(rule, " ") + "\n")
+	}
+	if addJump {
+		b.WriteString("-I INPUT 1 -j " + chainName + "\n")
+	}
+	b.WriteString("COMMIT\n")
+	return b.String()
 }
 
 // removeIPTablesRules wipes the firewall completely: every chain flushed, every

@@ -1,9 +1,7 @@
 module knock
 
-go 1.24.0
+go 1.26.0
 
-toolchain go1.24.11
+require golang.org/x/crypto v0.57.0
 
-require golang.org/x/crypto v0.46.0
-
-require golang.org/x/sys v0.39.0 // indirect
+require golang.org/x/sys v0.48.0 // indirect

@@ -126,3 +126,32 @@ func testHostKey(t *testing.T) ssh.Signer {
 
 	return signer
 }
+
+func TestSourceKeyGroupsIPv6ByPrefix(t *testing.T) {
+	if sourceKey("1.2.3.4") != "1.2.3.4" {
+		t.Error("an IPv4 address is its own source")
+	}
+	if sourceKey("2001:db8:1:2::1") != sourceKey("2001:db8:1:2:ffff::9") {
+		t.Error("two addresses in one /64 must be one source")
+	}
+	if sourceKey("2001:db8:1:2::1") == sourceKey("2001:db8:1:3::1") {
+		t.Error("different /64s must be different sources")
+	}
+}
+
+func TestSourceLimiterCapsEachSource(t *testing.T) {
+	limiter := newSourceLimiter(2)
+	if !limiter.acquire("a") || !limiter.acquire("a") {
+		t.Fatal("a source must get up to the limit")
+	}
+	if limiter.acquire("a") {
+		t.Error("a source must not get past the limit")
+	}
+	if !limiter.acquire("b") {
+		t.Error("one source at its limit must not block another")
+	}
+	limiter.release("a")
+	if !limiter.acquire("a") {
+		t.Error("a released slot must be reusable")
+	}
+}

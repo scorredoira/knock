@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -12,9 +13,15 @@ import (
 // maxConcurrentKnocks bounds the handshakes in flight. Each connection holds a
 // goroutine and a key exchange for up to the deadline below, and the port is
 // open to the internet, so the count has to be capped somewhere.
-const maxConcurrentKnocks = 32
+const maxConcurrentKnocks = 128
 
-const knockTimeout = 30 * time.Second
+// maxKnocksPerSource stops one source from taking every slot above by opening
+// connections and sending nothing. A real client only ever has one open.
+const maxKnocksPerSource = 2
+
+// knockTimeout bounds the whole connection. A knock or an `out` is one
+// handshake and one reply, well under a second on any real link.
+const knockTimeout = 10 * time.Second
 
 func serve() {
 	config, err := loadConfig()
@@ -83,6 +90,7 @@ func serve() {
 	fmt.Printf("knock listening on port %d\n", port)
 
 	inFlight := make(chan struct{}, maxConcurrentKnocks)
+	perSource := newSourceLimiter(maxKnocksPerSource)
 
 	for {
 		conn, err := listener.Accept()
@@ -91,17 +99,66 @@ func serve() {
 			continue
 		}
 
+		source := sourceKey(extractIP(conn.RemoteAddr().String()))
+		if !perSource.acquire(source) {
+			fmt.Fprintf(os.Stderr, "Too many connections from %s, dropping\n", source)
+			conn.Close()
+			continue
+		}
+
 		select {
 		case inFlight <- struct{}{}:
 			go func() {
 				defer func() { <-inFlight }()
+				defer perSource.release(source)
 				handleConnection(conn, sshConfig)
 			}()
 		default:
+			perSource.release(source)
 			fmt.Fprintf(os.Stderr, "Too many connections in flight, dropping %s\n", conn.RemoteAddr())
 			conn.Close()
 		}
 	}
+}
+
+// sourceLimiter counts open connections per source.
+type sourceLimiter struct {
+	mu    sync.Mutex
+	limit int
+	open  map[string]int
+}
+
+func newSourceLimiter(limit int) *sourceLimiter {
+	return &sourceLimiter{limit: limit, open: map[string]int{}}
+}
+
+func (l *sourceLimiter) acquire(source string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.open[source] >= l.limit {
+		return false
+	}
+	l.open[source]++
+	return true
+}
+
+func (l *sourceLimiter) release(source string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.open[source]--
+	if l.open[source] <= 0 {
+		delete(l.open, source)
+	}
+}
+
+// sourceKey is what counts as one source: the address for IPv4, the /64 for
+// IPv6, since a single host is routinely handed a whole /64.
+func sourceKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() != nil {
+		return ip
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 func handleConnection(conn net.Conn, sshConfig *ssh.ServerConfig) {

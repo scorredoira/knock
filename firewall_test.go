@@ -149,3 +149,37 @@ func TestIsIPv6(t *testing.T) {
 		t.Error("garbage classified as IPv6")
 	}
 }
+
+// The chain goes in as one transaction: declared, filled and committed
+// together, with its DROP inside the commit, so it is never seen half built.
+func TestRestoreInputIsOneTransactionEndingInDrop(t *testing.T) {
+	input := buildRestoreInput(buildChainRules(testConfig(), false), true)
+	lines := strings.Split(strings.TrimSpace(input), "\n")
+
+	if lines[0] != "*filter" || lines[1] != ":KNOCK - [0:0]" {
+		t.Fatalf("restore input must open the filter table and declare the chain, got %q", lines[:2])
+	}
+	if lines[len(lines)-1] != "COMMIT" {
+		t.Fatalf("restore input must end in COMMIT, got %q", lines[len(lines)-1])
+	}
+	if lines[len(lines)-2] != "-I INPUT 1 -j KNOCK" || lines[len(lines)-3] != "-A KNOCK -j DROP" {
+		t.Errorf("the DROP and the jump must be inside the commit, got %q", lines[len(lines)-3:])
+	}
+
+	without := buildRestoreInput(buildChainRules(testConfig(), false), false)
+	if strings.Contains(without, "INPUT") {
+		t.Error("an installed jump must not be added twice")
+	}
+}
+
+func TestKnockRateLimitCountsIPv6ByPrefix(t *testing.T) {
+	v4 := strings.Join(flatten(buildChainRules(testConfig(), false)), "\n")
+	v6 := strings.Join(flatten(buildChainRules(testConfig(), true)), "\n")
+
+	if !strings.Contains(v6, "--hashlimit-srcmask 64") {
+		t.Error("IPv6 rate limit must count a /64 as one source")
+	}
+	if strings.Contains(v4, "--hashlimit-srcmask") {
+		t.Error("IPv4 rate limit must count each address")
+	}
+}

@@ -139,7 +139,13 @@ func deploy(sshHost string) {
 
 	// 2. Build binary
 	fmt.Printf("Building knock for linux/%s...\n", goarch)
-	tmpBinary := "/tmp/knock-deploy"
+	tmpDir, err := os.MkdirTemp("", "knock-deploy")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create temp dir: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(tmpDir)
+	tmpBinary := filepath.Join(tmpDir, "knock")
 
 	cmd := exec.Command("go", "build", "-ldflags=-s -w", "-o", tmpBinary, ".")
 	cmd.Dir = sourceDir
@@ -150,11 +156,16 @@ func deploy(sshHost string) {
 		fmt.Fprintf(os.Stderr, "Build failed: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.Remove(tmpBinary)
+
+	// Staged in the remote user's home, not /tmp: in a world-writable dir
+	// another user could swap the file between the upload and the copy that
+	// installs it as root.
+	const remoteBinary = ".knock-deploy"
+	const remoteService = ".knock-deploy.service"
 
 	// 3. Upload binary
 	fmt.Println("Uploading binary...")
-	scpArgs := []string{tmpBinary, sshHost + ":/tmp/knock"}
+	scpArgs := []string{tmpBinary, sshHost + ":" + remoteBinary}
 	if runtime.GOOS == "darwin" {
 		scpArgs = append([]string{"-O"}, scpArgs...)
 	}
@@ -168,7 +179,7 @@ func deploy(sshHost string) {
 
 	// 4. Upload service file
 	fmt.Println("Uploading service file...")
-	scpArgs = []string{servicePath, sshHost + ":/tmp/knock.service"}
+	scpArgs = []string{servicePath, sshHost + ":" + remoteService}
 	if runtime.GOOS == "darwin" {
 		scpArgs = append([]string{"-O"}, scpArgs...)
 	}
@@ -184,15 +195,15 @@ func deploy(sshHost string) {
 	fmt.Println("Installing...")
 	installCmds := []string{
 		"systemctl stop knock 2>/dev/null || true",
-		"cp /tmp/knock /usr/local/bin/knock",
+		"cp " + remoteBinary + " /usr/local/bin/knock",
 		"chmod 755 /usr/local/bin/knock",
-		"cp /tmp/knock.service /etc/systemd/system/",
+		"cp " + remoteService + " /etc/systemd/system/knock.service",
 		"mkdir -p /etc/knock",
 		"test -f /etc/knock/host_key || ssh-keygen -q -t ed25519 -f /etc/knock/host_key -N ''",
 		"systemctl daemon-reload",
 		"systemctl enable knock",
 		"systemctl restart knock",
-		"rm -f /tmp/knock /tmp/knock.service",
+		"rm -f " + remoteBinary + " " + remoteService,
 	}
 	for _, c := range installCmds {
 		cmd = exec.Command("ssh", sshHost, c)

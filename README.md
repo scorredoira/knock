@@ -71,7 +71,9 @@ Configurables en `/etc/knock/config.json`:
 - `publicPorts` — abiertos a todo el mundo. Por defecto **80, 443**
 - `protectedPorts` — solo desde IPs de la whitelist. Por defecto **22**
 - **722** — knock, siempre abierto: es la vía de entrada. Limitado a 10 nuevas
-  conexiones por minuto y por IP de origen
+  conexiones por minuto y 2 a la vez por origen (en IPv6, por /64), y cada
+  conexión se corta a los 10 s. Así nadie puede ocupar el puerto abriendo
+  conexiones sin enviar nada y dejarte sin knock
 
 Los defaults son lo mínimo que sirve en cualquier servidor. Lo que sea de una
 máquina concreta va en su `config.json` y no aquí — por ejemplo, en `help`:
@@ -97,8 +99,10 @@ de INPUT. `INPUT`, `OUTPUT` y `FORWARD` nunca se vacían y sus políticas no se
 tocan, así que las reglas de cualquier otra cosa que corra en la máquina
 sobreviven.
 
-La cadena termina en `DROP`, o sea que deniega por defecto ella sola. Mientras
-se reconstruye (al añadir una IP) la máquina falla **cerrada**, no abierta.
+La cadena termina en `DROP`, o sea que deniega por defecto ella sola. Se carga
+entera en una sola transacción (`iptables-restore --noflush`): nunca queda
+vacía ni sin su `DROP` final, ni siquiera un instante. Si algo falla, se queda
+la cadena anterior.
 
 `knock open` **sí es destructivo, y a propósito**: vacía INPUT, OUTPUT y FORWARD,
 pone las tres políticas en ACCEPT y borra la cadena KNOCK. Es la vía de escape

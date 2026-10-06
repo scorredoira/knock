@@ -114,8 +114,17 @@ func remoteCommand(host string, args []string) {
 	os.Exit(int(code))
 }
 
+// homeDir is the user's home on every OS: $HOME is not set on Windows.
+func homeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
+}
+
 func knownHostsPath() string {
-	return filepath.Join(os.Getenv("HOME"), ".knock", "known_hosts.json")
+	return filepath.Join(homeDir(), ".knock", "known_hosts.json")
 }
 
 // verifyHostKey pins the server key on first use and refuses to knock at a
@@ -175,11 +184,11 @@ func saveKnownHosts(known map[string]string) error {
 }
 
 func loadClientKeys() []ssh.Signer {
-	home := os.Getenv("HOME")
+	sshDir := filepath.Join(homeDir(), ".ssh")
 	candidates := []string{
-		home + "/.ssh/id_ed25519",
-		home + "/.ssh/id_ecdsa",
-		home + "/.ssh/id_rsa",
+		filepath.Join(sshDir, "id_ed25519"),
+		filepath.Join(sshDir, "id_ecdsa"),
+		filepath.Join(sshDir, "id_rsa"),
 	}
 
 	var signers []ssh.Signer
@@ -198,8 +207,7 @@ func loadClientKeys() []ssh.Signer {
 }
 
 func resolveSSHHost(alias string) string {
-	home := os.Getenv("HOME")
-	data, err := os.ReadFile(home + "/.ssh/config")
+	data, err := os.ReadFile(filepath.Join(homeDir(), ".ssh", "config"))
 	if err != nil {
 		return alias
 	}
